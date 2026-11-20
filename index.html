@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#18212b">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Highway">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" href="icon-192.png">
+<title>HIGHWAY DRIVE 8-BIT</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;margin:0;background:#18212b;font-family:monospace;overflow:hidden;color:#fff;user-select:none;-webkit-user-select:none;overscroll-behavior:none;touch-action:none}
+canvas{display:block;position:fixed;inset:0;width:100vw;height:100dvh;image-rendering:pixelated}
+#hud{position:absolute;top:calc(10px + env(safe-area-inset-top));left:calc(12px + env(safe-area-inset-left));right:calc(12px + env(safe-area-inset-right));display:flex;justify-content:space-between;gap:7px;pointer-events:none}
+.stat{background:#18212b;border:3px solid #8292a5;padding:8px 11px;font-size:12px;font-weight:bold;box-shadow:3px 3px #101923}
+#pause{position:absolute;right:calc(12px + env(safe-area-inset-right));top:calc(62px + env(safe-area-inset-top));background:#263648;color:#fff;border:3px solid #8292a5;padding:9px 14px;font-family:monospace;font-weight:bold;box-shadow:3px 3px #101923}
+#controls{position:absolute;bottom:calc(16px + env(safe-area-inset-bottom));left:calc(14px + env(safe-area-inset-left));right:calc(14px + env(safe-area-inset-right));display:flex;justify-content:space-between;pointer-events:none}
+.control{pointer-events:auto;width:30vw;max-width:130px;height:68px;background:#263648cc;color:#fff;border:3px solid #8292a5;font-size:26px;font-weight:bold;touch-action:none;font-family:monospace;box-shadow:4px 4px #101923}
+#overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#101923dc}
+.panel{width:min(340px,90vw);padding:28px;background:#202d3d;border:4px solid #8292a5;text-align:center;box-shadow:8px 8px #080d13}
+.panel h1{font-size:25px;line-height:1.4;margin:0 0 20px;letter-spacing:1px}
+.panel p{color:#d6e0ed;font-size:13px;line-height:1.7}
+.panel button{width:100%;padding:14px;border:3px solid #8ecbff;background:#2584d8;color:#fff;font-family:monospace;font-size:17px;font-weight:bold;margin-top:12px;box-shadow:4px 4px #101923}
+#highscore{font-size:15px;margin:18px 0;color:#f5c451}
+.hidden{display:none!important}
+button{cursor:pointer}
+button:active{transform:translate(2px,2px);box-shadow:1px 1px #101923!important}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">
+  <div class="stat">SCORE: <span id="score">0</span></div>
+  <div class="stat"><span id="speed">0</span> KM/U</div>
+  <div class="stat"><span id="distance">0</span> M</div>
+</div>
+<button id="pause" class="hidden">PAUZE</button>
+<div id="controls" class="hidden">
+  <button class="control" id="left">◀</button>
+  <button class="control" id="right">▶</button>
+</div>
+<div id="overlay">
+  <div class="panel">
+    <h1 id="title">HIGHWAY DRIVE</h1>
+    <div id="highscore">HIGHSCORE: <span id="best">0</span></div>
+    <p id="message" class="hidden"></p>
+    <button id="start">START</button>
+  </div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const canvas=$("game"),screenCtx=canvas.getContext("2d");
+const buffer=document.createElement("canvas"),ctx=buffer.getContext("2d");
+const PIXEL_SIZE=3,LANES=5,K=2.4;
+const carColors=["#2878d0","#f5c542","#f5f5f5","#17191d","#32a852","#9149c9","#ed8b28","#19a9a0","#9299a2","#e66a9c"];
+
+let W,H,DPR,roadX,roadW,laneW;
+let running=false,paused=false,debug=false;
+let score=0,distance=0,speed=120,roadOffset=0,spawnTimer=0,clock=0,lastTime=0;
+let traffic=[],keys={};
+let best=Number(localStorage.getItem("highwayBest")||0);
+const player={lx:2,y:0,w:30,h:54,vx:0,ang:0,sig:0,braking:false,color:"#2878d0"};
+$("best").textContent=best;
+
+const rand=(a,b)=>Math.random()*(b-a)+a;
+const cx=v=>roadX+(v.lx+.5)*laneW;
+
+function resize(){
+  DPR=Math.min(devicePixelRatio||1,2);
+  W=innerWidth;H=innerHeight;
+  canvas.width=W*DPR;canvas.height=H*DPR;
+  buffer.width=Math.ceil(W/PIXEL_SIZE);buffer.height=Math.ceil(H/PIXEL_SIZE);
+  ctx.setTransform(buffer.width/W,0,0,buffer.height/H,0,0);
+  screenCtx.setTransform(DPR,0,0,DPR,0,0);
+  roadW=Math.min(W*.84,LANES*66);
+  roadX=(W-roadW)/2;
+  laneW=roadW/LANES;
+  player.w=laneW*.56;player.h=player.w*1.8;player.y=H*.68;
+}
+addEventListener("resize",resize);resize();
+
+/* ---------- tekenen ---------- */
+function drawRoad(){
+  ctx.fillStyle="#397c3e";ctx.fillRect(0,0,W,H);
+  for(let i=0;i<30;i++){
+    const y=(i*83+roadOffset*1.5)%H;
+    ctx.fillStyle=i%2?"#438c46":"#347239";
+    ctx.fillRect(roadX-35,y,15,5);ctx.fillRect(roadX+roadW+20,y+25,13,5);
+  }
+  ctx.fillStyle="#b9b9b9";ctx.fillRect(roadX-10,0,roadW+20,H);
+  ctx.fillStyle="#45494f";ctx.fillRect(roadX,0,roadW,H);
+  ctx.fillStyle="#f5f5f5";
+  ctx.fillRect(roadX+4,0,3,H);ctx.fillRect(roadX+roadW-7,0,3,H);
+  for(let i=1;i<LANES;i++){
+    const x=roadX+i*laneW;
+    for(let y=-75+roadOffset;y<H;y+=75)ctx.fillRect(x-1.5,y,3,38);
+  }
+}
+
+function lights(v,x,y,w,h){
+  ctx.fillStyle="#fff5c5";
+  ctx.fillRect(x+2,y+1,5,4);ctx.fillRect(x+w-7,y+1,5,4);
+  ctx.fillStyle=v.braking?"#ff7070":"#a81818";
+  ctx.fillRect(x+2,y+h-5,6,4);ctx.fillRect(x+w-8,y+h-5,6,4);
+  if(v.braking){ctx.fillStyle="#ff3030";ctx.fillRect(x+w/2-3,y+h-4,6,2)}
+  if(v.sig&&Math.floor(clock*3)%2===0){
+    ctx.fillStyle="#ffa81c";
+    const sx=v.sig<0?x-3:x+w-1;
+    ctx.fillRect(sx,y+1,4,5);ctx.fillRect(sx,y+h-6,4,5);
+  }
+}
+function aggro(v,x,y,w,h){
+  if(!v.aggressive)return;
+  ctx.fillStyle="#ff3030";
+  ctx.fillRect(x-3,y-3,w+6,3);ctx.fillRect(x-3,y+h,w+6,3);
+  ctx.fillRect(x-3,y-3,3,h+6);ctx.fillRect(x+w,y-3,3,h+6);
+}
+function drawCar(v){
+  const w=v.w,h=v.h,x=-w/2,y=-h/2,c=v.color;
+  ctx.fillStyle="#252525";ctx.fillRect(x+3,y+4,w,h);
+  ctx.fillStyle="#101010";
+  for(const f of[.17,.65]){ctx.fillRect(x-3,y+h*f,5,h*.2);ctx.fillRect(x+w-2,y+h*f,5,h*.2)}
+  ctx.fillRect(x-2,y-2,w+4,h+4);
+  ctx.fillStyle=c;ctx.fillRect(x,y,w,h);
+  ctx.fillStyle="#a9d4e8";
+  ctx.fillRect(x+3,y+h*.27,w-6,h*.18);ctx.fillRect(x+3,y+h*.6,w-6,h*.15);
+  ctx.fillStyle="#30343a";
+  ctx.fillRect(x+3,y+h-3,w-6,2);
+  lights(v,x,y,w,h);aggro(v,x,y,w,h);
+}
+function drawTruck(v){
+  const w=v.w,h=v.h,x=-w/2,y=-h/2,cab=h*.27;
+  ctx.fillStyle="#252525";ctx.fillRect(x+4,y+5,w,h);
+  ctx.fillStyle="#101010";
+  for(const f of[.12,.62,.8]){ctx.fillRect(x-3,y+h*f,5,h*.12);ctx.fillRect(x+w-2,y+h*f,5,h*.12)}
+  ctx.fillRect(x-2,y-2,w+4,h+4);
+  ctx.fillStyle=v.color;ctx.fillRect(x,y+cab,w,h-cab);
+  ctx.fillStyle="#fff";
+  for(const f of[.38,.58,.78])ctx.fillRect(x+4,y+h*f,w-8,3);
+  ctx.fillStyle="#e8e8e8";ctx.fillRect(x,y,w,cab);
+  ctx.fillStyle="#a9d4e8";ctx.fillRect(x+3,y+cab*.3,w-6,cab*.4);
+  ctx.fillStyle="#101010";ctx.fillRect(x,y+cab-1,w,2);
+  lights(v,x,y,w,h);aggro(v,x,y,w,h);
+}
+function drawV(v){
+  ctx.save();ctx.translate(cx(v),v.y+v.h/2);ctx.rotate(v.ang);
+  v.truck?drawTruck(v):drawCar(v);
+  ctx.restore();
+}
+
+/* ---------- hitboxes (gedraaide rechthoeken + SAT) ---------- */
+function corners(v,sx,sy){
+  const c=cx(v),m=v.y+v.h/2,hw=v.w/2*sx,hh=v.h/2*sy,co=Math.cos(v.ang),si=Math.sin(v.ang);
+  return[[-hw,-hh],[hw,-hh],[hw,hh],[-hw,hh]].map(p=>[c+p[0]*co-p[1]*si,m+p[0]*si+p[1]*co]);
+}
+function sat(A,B){
+  for(const P of[A,B])for(let i=0;i<4;i++){
+    const p=P[i],q=P[(i+1)%4],nx=q[1]-p[1],ny=p[0]-q[0];
+    let a0=1e9,a1=-1e9,b0=1e9,b1=-1e9;
+    for(const c of A){const d=c[0]*nx+c[1]*ny;if(d<a0)a0=d;if(d>a1)a1=d}
+    for(const c of B){const d=c[0]*nx+c[1]*ny;if(d<b0)b0=d;if(d>b1)b1=d}
+    if(a1<b0||b1<a0)return false;
+  }
+  return true;
+}
+function drawHitbox(v){
+  const c=corners(v,.9,.94);
+  ctx.strokeStyle="#00ff66";ctx.lineWidth=1.5;ctx.beginPath();
+  ctx.moveTo(c[0][0],c[0][1]);for(let i=1;i<4;i++)ctx.lineTo(c[i][0],c[i][1]);
+  ctx.closePath();ctx.stroke();
+}
+
+/* ---------- verkeerslogica ---------- */
+function dims(v){v.w=laneW*v.wf;v.h=v.w*v.ratio}
+function pObj(){return{lx:player.lx,y:player.y,h:player.h,speed:speed,lane:-9,targetLane:null}}
+
+// Is baan L veilig om naar te wisselen? (houdt rekening met snelheidsverschil en gereserveerde banen)
+function safe(v,L){
+  for(const o of traffic.concat([pObj()])){
+    if(o===v)continue;
+    if(!(Math.abs(o.lx-L)<.9||o.lane===L||o.targetLane===L))continue;
+    if(o.y+o.h/2<v.y+v.h/2){
+      if(v.y-(o.y+o.h)<40+Math.max(0,v.speed-o.speed)*3.5)return false;
+    }else{
+      if(o.y-(v.y+v.h)<40+Math.max(0,o.speed-v.speed)*4)return false;
+    }
+  }
+  return true;
+}
+function ahead(v,L){
+  let best={gap:1e9,speed:999};
+  for(const o of traffic){
+    if(o===v||!(Math.abs(o.lx-L)<.9||o.lane===L||o.targetLane===L))continue;
+    if(o.y+o.h/2<v.y+v.h/2){const g=v.y-(o.y+o.h);if(g<best.gap)best={gap:g,speed:o.speed}}
+  }
+  return best;
+}
+function startSignal(v,L){
+  v.targetLane=L;v.dir=Math.sign(L-v.lane);v.state="signal";
+  v.timer=v.aggressive?.5:1.4;
+}
+function decide(v,lead,gap){
+  const fd=30+v.speed*.6;
+  const blocked=lead&&gap<fd*2.5&&lead.speed<v.desired-6;
+  let want=null;
+  if(blocked){
+    // inhalen: liefst links
+    for(const L of[v.lane-1,v.lane+1]){
+      if(L<0||L>=LANES||!safe(v,L))continue;
+      const a=ahead(v,L);
+      if(a.gap>gap+80||a.speed>=v.desired-6){want=L;break}
+    }
+  }else if(v.lane!==v.home){
+    // terug naar eigen baan als het vrij is
+    const L=v.lane+Math.sign(v.home-v.lane);
+    if(safe(v,L)){const a=ahead(v,L);if(a.speed>=v.desired-6||a.gap>200)want=L}
+  }
+  if(want!==null)startSignal(v,want);else v.cool=rand(.4,.9);
+}
+
+function spawn(){
+  const truck=Math.random()<.14,ag=!truck&&Math.random()<.22;
+  const wf=truck?.62:.56,ratio=truck?2.8:1.8;
+  const lanes=[...Array(LANES).keys()].sort(()=>Math.random()-.5);
+  for(const L of lanes){
+    if(traffic.some(o=>(Math.abs(o.lx-L)<.9||o.targetLane===L)&&o.y<190))continue;
+    const desired=truck?rand(38,55):ag?rand(70,88):rand(48,75);
+    const v={lx:L,lane:L,home:L,targetLane:null,y:0,wf,ratio,w:0,h:0,ang:0,sig:0,dir:0,
+      color:ag?"#e02020":carColors[Math.floor(Math.random()*carColors.length)],
+      truck,aggressive:ag,speed:desired,desired,state:"cruise",timer:0,
+      cool:rand(2,5),braking:false};
+    dims(v);v.y=-v.h-20;traffic.push(v);return;
+  }
+}
+
+function updateTraffic(dt){
+  spawnTimer-=dt;
+  if(spawnTimer<=0){spawn();spawnTimer=rand(.45,.8)}
+  traffic.sort((a,b)=>a.y-b.y);
+  for(const v of traffic){
+    dims(v);
+    // voorligger zoeken
+    let lead=null,gap=1e9;
+    for(const o of traffic){
+      if(o===v||o.y>=v.y||Math.abs(o.lx-v.lx)>=.9)continue;
+      const g=v.y-(o.y+o.h);
+      if(g<gap){gap=g;lead=o}
+    }
+    // snelheid regelen
+    let target=v.desired;
+    if(lead){
+      const fd=30+v.speed*.6;
+      if(gap<fd*2.2&&lead.speed<target)
+        target=gap<fd?Math.max(12,lead.speed-12*(1-gap/fd)):lead.speed;
+    }
+    v.braking=v.speed>target+3;
+    if(v.speed>target)v.speed=Math.max(target,v.speed-35*dt);
+    else v.speed=Math.min(target,v.speed+10*dt);
+    v.y+=(speed-v.speed)*K*dt;
+    if(lead){ // vangnet: nooit door de voorligger heen
+      const lim=lead.y+lead.h+3;
+      if(v.y<lim){v.y=lim;v.speed=Math.min(v.speed,lead.speed)}
+    }
+    // toestanden: cruise -> signal (knipperen) -> change (wisselen)
+    if(v.state==="cruise"){
+      v.cool-=dt;if(v.cool<=0)decide(v,lead,gap);
+    }else if(v.state==="signal"){
+      v.timer-=dt;
+      if(v.timer<=0){
+        if(safe(v,v.targetLane))v.state="change";
+        else{v.state="cruise";v.targetLane=null;v.dir=0;v.cool=3}
+      }
+    }else{
+      const rate=v.aggressive?1.3:.9,d=v.targetLane-v.lx;
+      v.lx+=Math.sign(d)*Math.min(Math.abs(d),rate*dt);
+      if(Math.abs(v.targetLane-v.lx)<.01){
+        v.lx=v.lane=v.targetLane;v.targetLane=null;v.dir=0;v.state="cruise";
+        v.cool=v.aggressive?rand(3,5):rand(6,10);
+      }
+    }
+    v.sig=v.state==="cruise"?0:v.dir;
+    const tilt=v.state==="change"?v.dir*(v.aggressive?1.3:.9)*.09:0;
+    v.ang+=(tilt-v.ang)*Math.min(1,dt*8);
+  }
+  traffic=traffic.filter(v=>v.y<H+150);
+}
+
+/* ---------- spel ---------- */
+function update(dt){
+  if(!running||paused)return;
+  speed=Math.min(220,speed+dt*.7);
+  let dir=0;
+  if(keys.ArrowLeft||keys.a||keys.A)dir--;
+  if(keys.ArrowRight||keys.d||keys.D)dir++;
+  player.vx+=(dir*3.2-player.vx)*Math.min(1,dt*9);
+  player.lx+=player.vx*dt;
+  const m=(10+player.w/2)/laneW-.5,lo=m,hi=LANES-1-m;
+  if(player.lx<lo){player.lx=lo;player.vx=0}
+  if(player.lx>hi){player.lx=hi;player.vx=0}
+  player.ang=player.vx*.04;player.sig=dir;
+  updateTraffic(dt);
+  const pc=corners(player,.82,.92);
+  for(const v of traffic){
+    if(sat(pc,corners(v,.9,.94))){endGame();return}
+  }
+  distance+=speed*dt/3.6;
+  score=Math.floor(distance/5);
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  drawRoad();
+  for(const v of traffic)drawV(v);
+  if(running)drawV(player);
+  if(debug){for(const v of traffic)drawHitbox(v);drawHitbox(player)}
+  screenCtx.imageSmoothingEnabled=false;
+  screenCtx.clearRect(0,0,W,H);
+  screenCtx.drawImage(buffer,0,0,W,H);
+  $("score").textContent=score;
+  $("speed").textContent=Math.round(speed);
+  $("distance").textContent=Math.floor(distance);
+}
+
+function loop(t){
+  const dt=Math.min((t-lastTime)/1000||0,.04);
+  lastTime=t;clock+=dt;
+  roadOffset=(roadOffset+speed*K*dt)%75;
+  update(dt);draw();
+  requestAnimationFrame(loop);
+}
+
+let wake=null;
+async function keepAwake(){try{if("wakeLock"in navigator)wake=await navigator.wakeLock.request("screen")}catch(e){}}
+
+function startGame(){
+  score=0;distance=0;speed=120;traffic=[];spawnTimer=.5;
+  paused=false;running=true;
+  player.lx=(LANES-1)/2;player.vx=0;player.ang=0;player.sig=0;
+  $("overlay").style.display="none";
+  $("pause").classList.remove("hidden");
+  $("controls").classList.remove("hidden");
+  keepAwake();
+}
+function endGame(){
+  running=false;
+  if(navigator.vibrate)navigator.vibrate(120);
+  if(score>best){best=score;localStorage.setItem("highwayBest",best)}
+  $("title").textContent="GAME OVER";
+  $("highscore").textContent="HIGHSCORE: "+best;
+  $("message").innerHTML="Score: <b>"+score+"</b><br>Afstand: <b>"+Math.floor(distance)+" meter</b>";
+  $("message").classList.remove("hidden");
+  $("start").textContent="OPNIEUW";
+  $("overlay").style.display="flex";
+  $("pause").classList.add("hidden");
+  $("controls").classList.add("hidden");
+}
+function togglePause(){
+  if(!running)return;
+  paused=!paused;
+  if(paused){
+    $("title").textContent="GEPAUZEERD";
+    $("highscore").textContent="SCORE: "+score;
+    $("message").classList.add("hidden");
+    $("start").textContent="VERDER";
+    $("overlay").style.display="flex";
+  }else $("overlay").style.display="none";
+}
+
+$("start").addEventListener("click",()=>{
+  if(paused){paused=false;$("overlay").style.display="none"}
+  else{
+    $("message").classList.add("hidden");
+    $("title").textContent="HIGHWAY DRIVE";
+    $("highscore").textContent="HIGHSCORE: "+best;
+    $("start").textContent="START";
+    startGame();
+  }
+});
+$("pause").addEventListener("click",togglePause);
+
+function holdButton(id,key){
+  const b=$(id);
+  b.addEventListener("pointerdown",e=>{e.preventDefault();keys[key]=true;b.setPointerCapture(e.pointerId)});
+  const rel=()=>{keys[key]=false};
+  b.addEventListener("pointerup",rel);b.addEventListener("pointercancel",rel);b.addEventListener("lostpointercapture",rel);
+}
+holdButton("left","ArrowLeft");holdButton("right","ArrowRight");
+
+addEventListener("keydown",e=>{
+  keys[e.key]=true;
+  if(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"," "].includes(e.key))e.preventDefault();
+  if(e.key==="Escape"||e.key==="p"||e.key==="P")togglePause();
+  if(e.key==="h"||e.key==="H")debug=!debug;
+});
+addEventListener("keyup",e=>keys[e.key]=false);
+document.addEventListener("visibilitychange",()=>{
+  if(document.hidden){if(running&&!paused)togglePause()}
+  else if(running)keepAwake();
+});
+document.addEventListener("contextmenu",e=>e.preventDefault());
+
+if("serviceWorker"in navigator)addEventListener("load",()=>navigator.serviceWorker.register("service-worker.js").catch(()=>{}));
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
